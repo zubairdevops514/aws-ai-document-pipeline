@@ -1,0 +1,5 @@
+The checkout service returned elevated errors after a configuration change.
+The on-call engineer compared application logs with deployment timestamps.
+Rolling back the configuration restored successful requests.
+The team added a pre-deployment configuration validation check.
+No customer information is included in this synthetic example.
