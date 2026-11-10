@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Private S3 document processing portfolio demo with optional Bedrock
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: portfolio-docs
+    MinLength: 3
+    MaxLength: 18
+    AllowedPattern: '[a-z][a-z0-9-]*[a-z0-9]'
+    Description: Unique lowercase prefix within this account and region
+  BedrockModelId:
+    Type: String
+    Default: ''
+    Description: Optional Converse-compatible regional foundation model ID
+  BedrockModelArn:
+    Type: String
+    Default: ''
+    Description: Exact regional model ARN; required when model ID is supplied
+Conditions:
+  UseBedrock: !Not [!Equals [!Ref BedrockModelId, '']]
+Rules:
+  RequireModelArn:
+    RuleCondition: !Not [!Equals [!Ref BedrockModelId, '']]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref BedrockModelArn, '']]
+        AssertDescription: Supply the exact model ARN when enabling Bedrock
+Resources:
+  InputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectPrefix}-${AWS::AccountId}-${AWS::Region}-in'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireDemoDocuments
+            Status: Enabled
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireDemoResults
+            Status: Enabled
+            ExpirationInDays: 7
+  InputTlsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref InputBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt InputBucket.Arn, !Sub '${InputBucket.Arn}/*']
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+  OutputTlsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OutputBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt OutputBucket.Arn, !Sub '${OutputBucket.Arn}/*']
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+  Processor:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      CodeUri: src/
+      MemorySize: 256
+      Timeout: 120
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          INPUT_BUCKET: !Sub '${ProjectPrefix}-${AWS::AccountId}-${AWS::Region}-in'
+          OUTPUT_BUCKET: !Ref OutputBucket
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        MaximumEventAgeInSeconds: 3600
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailureQueue.Arn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObjectVersion
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${ProjectPrefix}-${AWS::AccountId}-${AWS::Region}-in/incoming/*'
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub '${OutputBucket.Arn}/results/*'
+        - !If
+          - UseBedrock
+          - Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Ref BedrockModelArn
+          - !Ref AWS::NoValue
+      Events:
+        DocumentUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref InputBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: incoming/
+                  - Name: suffix
+                    Value: .txt
+  FailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      SqsManagedSseEnabled: true
+      MessageRetentionPeriod: 1209600
+  ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Processor}'
+      RetentionInDays: 7
+  FailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Failed document events need operator review; no notification subscription configured
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FailureQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+Outputs:
+  InputBucketName:
+    Value: !Ref InputBucket
+  OutputBucketName:
+    Value: !Ref OutputBucket
+  FailureQueueUrl:
+    Value: !Ref FailureQueue
+  FunctionName:
+    Value: !Ref Processor
