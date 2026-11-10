@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "sha256": "2ae430e0939fdaa74bee99ded7cf78f1f6e6fd0d6fb6963f26f9d6634f07441e",
+  "mode": "extractive-local",
+  "bytes": 339,
+  "word_count": 43,
+  "summary": "The checkout service returned elevated errors after a configuration change. The on-call engineer compared application logs with deployment timestamps. Rolling back the configuration restored successful requests."
+}
